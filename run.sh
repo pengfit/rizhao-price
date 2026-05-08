@@ -4,7 +4,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CMD_DIR="$SCRIPT_DIR/commands"
 
-export PYTHON_CMD="${PYTHON_CMD:-python3}"
+export PYTHON_CMD="${PYTHON_CMD:-/usr/local/bin/python3}"
 
 show_usage() {
     echo "用法: ./run.sh <命令> [选项]"

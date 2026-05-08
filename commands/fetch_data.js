@@ -1,12 +1,15 @@
 /**
  * 日照材价信息数据抓取脚本
  * 使用 playwright 驱动 Chrome 获取动态页面数据
+ *
+ * 三种模式:
+ *   node fetch_data.js metadata                  - 获取 tabs + periods
+ *   node fetch_data.js paginate <type> <page>   - 单页 JSON（兼容旧调用）
+ *   node fetch_data.js stream <type> <maxPages>  - 流式输出，每抓完一页立即输出一行 JSON Lines
  */
 const { chromium } = require('playwright');
 
 const TARGET_URL = 'http://58.59.43.227:81/dist/#/index/priceDissemination';
-
-// Chromium path from playwright install
 const CHROME_PATH = '/Users/pengfit/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
 
 async function sleep(ms) {
@@ -14,208 +17,212 @@ async function sleep(ms) {
 }
 
 /**
- * 从页面抓取表格数据
- * @param {string} tabType - 类别: '1'=建设工程材料, '2'=园林绿化苗木, '3'=区县材料
- * @param {number} maxPages - 最大页数
- * @param {number} pageSize - 每页行数
- * @returns {object} { rows, totalCount, periods, pageSize }
+ * 等待表格行出现，使用更精确的条件
  */
-async function fetchPriceData(tabType = '1', maxPages = 200, pageSize = 10) {
+async function waitTable(page, timeout = 20000) {
+  try {
+    await page.waitForSelector('.el-table__body-wrapper tbody tr', { timeout });
+    // 等一小段时间让 Vue 渲染完成
+    await sleep(300);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 从当前页面提取 rows
+ */
+async function extractRows(page) {
+  return page.evaluate(() => {
+    const tbody = document.querySelector('.el-table__body-wrapper tbody');
+    if (!tbody) return [];
+    return Array.from(tbody.querySelectorAll('tr')).map(row => {
+      const cells = row.querySelectorAll('td');
+      return Array.from(cells).map(c => (c.innerText || '').replace(/\s+/g, ' ').trim());
+    }).filter(cells => cells.length >= 5);
+  });
+}
+
+/**
+ * 初始化浏览器并访问目标页，返回 browser + page + periods
+ */
+async function initBrowser(tabType) {
   const browser = await chromium.launch({
     executablePath: CHROME_PATH,
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
-
   const page = await browser.newPage();
   await page.setViewportSize({ width: 1280, height: 900 });
 
-  console.error(`[i] 打开目标页面 (type=${tabType})...`);
   await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-  await sleep(3000);
+  await sleep(2500);
 
-  // Click the specified tab if not type 1
+  // 切换 tab
   if (tabType !== '1') {
     const tabs = await page.$$('.swiper-slide');
-    const tabIndex = parseInt(tabType) - 1;
-    if (tabs[tabIndex]) {
-      await tabs[tabIndex].click();
-      console.error(`[i] 已切换到类别 ${tabType}`);
-      await sleep(3000);
+    const idx = parseInt(tabType) - 1;
+    if (tabs[idx]) {
+      await tabs[idx].click();
+      // 等待 Vue 切换完成后网络空闲
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      await sleep(1000);
     }
   }
 
-  // Get current period from page
+  // 读取当前期数
   const periods = await page.evaluate(() => {
-    // Look for the period display
-    const inputs = document.querySelectorAll('input');
-    for (const inp of inputs) {
-      if (inp.value && /\d{4}-\d{2}/.test(inp.value)) {
-        return inp.value;
-      }
+    for (const inp of document.querySelectorAll('input')) {
+      if (inp.value && /\d{4}-\d{2}/.test(inp.value)) return inp.value;
     }
     return '';
   });
 
-  // Get total count from pagination
-  const totalCount = await page.evaluate(() => {
-    const pager = document.querySelector('.el-pagination');
-    if (!pager) return 0;
-    const span = pager.querySelector('span.el-pagination__total');
+  return { browser, page, periods };
+}
+
+/**
+ * 获取总记录数
+ */
+async function getTotalCount(page) {
+  return page.evaluate(() => {
+    const span = document.querySelector('.el-pagination__total');
     if (span) {
       const m = span.innerText.match(/共\s*(\d+)\s*条/);
       if (m) return parseInt(m[1]);
     }
     return 0;
   });
+}
 
-  console.error(`[i] 期数: ${periods}, 总记录: ${totalCount}`);
+/**
+ * 点击"下一页"按钮，成功返回 true
+ */
+async function clickNext(page) {
+  const isDisabled = await page.evaluate(() => {
+    const btn = document.querySelector('.btn-next');
+    return !btn || btn.classList.contains('is-disabled') || btn.disabled;
+  });
+  if (isDisabled) return false;
 
-  const allRows = [];
+  const nextBtn = await page.$('.btn-next');
+  await nextBtn.click();
+  // 等待网络响应而不是固定 sleep
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  await sleep(500);
+  return true;
+}
+
+/**
+ * 流式模式：每抓完一页立即 flush 输出，109 页连续抓取
+ */
+async function streamPages(tabType, maxPages) {
+  const { browser, page, periods } = await initBrowser(tabType);
+  const totalCount = await getTotalCount(page);
+  const pageSize = 10;
+  const totalPages = Math.ceil(totalCount / pageSize) || 1;
+  const maxToFetch = Math.min(totalPages, maxPages);
+
+  console.error(`[i] 期数: ${periods}, 总记录: ${totalCount}, 总页数: ${totalPages}`);
+
+  // 第1页
+  const rows0 = await extractRows(page);
+  const pageRows = rows0.map(cells => ({
+    index: cells[0], clmc: cells[1], ggxh: cells[2], dw: cells[3], price: cells[4], remark: cells[5]
+  }));
+  console.log(JSON.stringify({ page: 1, rows: pageRows, totalCount, totalPages, periods, pageSize }));
+  console.error(`[i] 第 1 页: ${pageRows.length} 行`);
+
+  // 第2页及以后：连续翻页，每次等待网络空闲
   let currentPage = 1;
-  let hasNextPage = true;
-
-  while (currentPage <= maxPages && hasNextPage) {
-    // Wait for table body to have content
-    try {
-      await page.waitForSelector('.el-table__body-wrapper tr', { timeout: 15000 });
-    } catch (e) {
-      console.error(`[!] 第 ${currentPage} 页等待表格超时`);
+  while (currentPage < maxToFetch) {
+    const ok = await clickNext(page);
+    if (!ok) {
+      console.error(`[i] 已到最后一页 (${currentPage})`);
       break;
     }
 
-    // Extract rows from current page
-    const pageRows = await page.evaluate(() => {
-      const tbody = document.querySelector('.el-table__body-wrapper');
-      if (!tbody) return [];
-      const rows = tbody.querySelectorAll('tr');
-      return Array.from(rows).map(row => {
-        const cells = row.querySelectorAll('td');
-        return Array.from(cells).map(cell => {
-          // Get innerText, stripping extra whitespace
-          return (cell.innerText || '').replace(/\s+/g, ' ').trim();
-        });
-      }).filter(cells => cells.length >= 4);
-    });
+    // 等待表格刷新（行数变化 或 小睡）
+    const rows = await extractRows(page);
+    currentPage++;
 
-    if (pageRows.length === 0) {
-      console.error(`[!] 第 ${currentPage} 页无数据`);
-      break;
-    }
+    const pageRowsN = rows.map(cells => ({
+      index: cells[0], clmc: cells[1], ggxh: cells[2], dw: cells[3], price: cells[4], remark: cells[5]
+    }));
+    console.log(JSON.stringify({ page: currentPage, rows: pageRowsN, totalCount, totalPages, periods, pageSize }));
+    console.error(`[i] 第 ${currentPage} 页: ${pageRowsN.length} 行`);
+  }
 
-    for (const cells of pageRows) {
-      allRows.push({
-        // 固定列: 序号, 材料名称, 规格型号, 单位, 参考价格(元), 备注
-        index: cells[0] || '',
-        clmc: cells[1] || '',
-        ggxh: cells[2] || '',
-        dw: cells[3] || '',
-        price: cells[4] || '',
-        remark: cells[5] || '',
-      });
-    }
+  console.log(JSON.stringify({ done: true, totalCount, totalPages, periods }));
+  await browser.close();
+}
 
-    console.error(`[i] 第 ${currentPage} 页: 抓取 ${pageRows.length} 行 (累计 ${allRows.length})`);
+/**
+ * 单页模式（兼容旧调用）
+ */
+async function fetchOnePage(tabType, targetPage) {
+  const { browser, page, periods } = await initBrowser(tabType);
+  const totalCount = await getTotalCount(page);
+  const pageSize = 10;
+  const totalPages = Math.ceil(totalCount / pageSize) || 1;
 
-    // Check if there's a next page button
-    const paginationInfo = await page.evaluate(() => {
-      const pager = document.querySelector('.el-pagination');
-      if (!pager) return { hasNext: false, currentPage: 1 };
-      const btnNext = pager.querySelector('.btn-next:not(.is-disabled), .el-pagination__next:not(.is-disabled)');
-      const activePage = pager.querySelector('.el-pagination__ jumper input') ||
-                         pager.querySelector('.el-pager .number.active') ||
-                         pager.querySelector('.el-pager li.number.is-active');
-      let currentPage = 1;
-      if (activePage) {
-        currentPage = parseInt(activePage.innerText) || 1;
-      }
-      return { hasNext: !!btnNext, currentPage };
-    });
-
-    if (!paginationInfo.hasNext || currentPage >= maxPages) {
-      hasNextPage = false;
+  // 翻到目标页（目标页 > 1 时用页码跳转）
+  if (targetPage > 1) {
+    // 尝试页码输入框直接跳转
+    const jumpInput = await page.$('.el-pagination__jump input, .el-pagination__jump .el-input__inner');
+    if (jumpInput) {
+      await jumpInput.fill(String(targetPage));
+      await jumpInput.press('Enter');
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      await sleep(800);
     } else {
-      // Click next button
-      const nextBtn = await page.$('.btn-next, .el-pagination__next');
-      if (nextBtn) {
-        const isDisabled = await nextBtn.evaluate(el =>
-          el.classList.contains('is-disabled') || el.disabled
-        );
-        if (isDisabled) {
-          hasNextPage = false;
-        } else {
-          await nextBtn.click();
-          await sleep(1500);
-          currentPage++;
-        }
-      } else {
-        hasNextPage = false;
+      // 逐页翻（最坏情况）
+      let cur = 1;
+      while (cur < targetPage) {
+        const ok = await clickNext(page);
+        if (!ok) break;
+        cur++;
       }
     }
   }
 
-  await browser.close();
+  const rows = await extractRows(page);
+  const pageRows = rows.map(cells => ({
+    index: cells[0], clmc: cells[1], ggxh: cells[2], dw: cells[3], price: cells[4], remark: cells[5]
+  }));
 
-  return {
-    rows: allRows,
-    totalCount,
-    periods,
-    pageSize,
-    tabType,
-  };
+  console.log(JSON.stringify({ page: targetPage, rows: pageRows, totalCount, totalPages, periods, pageSize }));
+  if (targetPage < totalPages) {
+    console.log(JSON.stringify({ done: true, totalCount, totalPages, periods }));
+  }
+  await browser.close();
 }
 
-// Get metadata only (tabs, tree) without full data fetch
+/**
+ * 元数据模式
+ */
 async function fetchMetadata() {
-  const browser = await chromium.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-  });
-
-  const page = await browser.newPage();
-  await page.setViewportSize({ width: 1280, height: 900 });
-
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-  await sleep(3000);
-
-  // Get tabs
-  const tabs = await page.evaluate(() => {
-    const slides = document.querySelectorAll('.swiper-slide');
-    return Array.from(slides).map(s => {
-      const name = s.querySelector('.tab-list-item')?.innerText?.trim() || '';
-      return { name };
-    });
-  });
-
-  // Get current periods from date picker
-  const periods = await page.evaluate(() => {
-    const inputs = document.querySelectorAll('input');
-    for (const inp of inputs) {
-      if (inp.value && /\d{4}-\d{2}/.test(inp.value)) {
-        return inp.value;
-      }
-    }
-    return '';
-  });
-
+  const { browser, page, periods } = await initBrowser('1');
+  const tabs = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.swiper-slide'))
+      .map(s => ({ name: s.querySelector('.tab-list-item')?.innerText?.trim() || '' }))
+  );
   await browser.close();
   return { tabs, periods };
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const cmd = args[0];
-
+  const [cmd, arg1, arg2] = process.argv.slice(2);
   try {
     if (cmd === 'metadata') {
       const data = await fetchMetadata();
       console.log(JSON.stringify(data));
+    } else if (cmd === 'stream') {
+      await streamPages(arg1 || '1', parseInt(arg2) || 200);
     } else {
-      const tabType = args[1] || '1';
-      const maxPages = parseInt(args[2]) || 200;
-      const data = await fetchPriceData(tabType, maxPages);
-      console.log(JSON.stringify(data));
+      // 默认单页模式（兼容旧调用 paginate）
+      await fetchOnePage(arg1 || '1', parseInt(arg2) || 1);
     }
   } catch (err) {
     console.error(`[ERROR] ${err.message}`);

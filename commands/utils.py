@@ -108,10 +108,20 @@ def ensure_index(es_host: str, es_index: str):
     try:
         resp = requests.head(f"{es_host}/{es_index}", timeout=10, verify=False)
         if resp.status_code == 200:
+            # 单节点 ES，确保 replica=0 避免 yellow
+            try:
+                requests.put(
+                    f"{es_host}/{es_index}/_settings",
+                    json={"index": {"number_of_replicas": 0}},
+                    timeout=15, verify=False
+                )
+            except Exception:
+                pass
             return
     except Exception:
         pass
     mapping = {
+        "settings": {"index": {"number_of_replicas": 0}},
         "mappings": {
             "properties": {
                 "breed":       {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 512}}},
