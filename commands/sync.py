@@ -111,11 +111,18 @@ class ProgressLogger:
             "error": "",
         }
         ensure_progress_index(es_host, index_name)
+        # 清理同名 run 残留的 init 条目（_id = run_id_）
+        try:
+            requests.delete(
+                f"{self.es_host}/{self.index}/_doc/{self.run_id}_",
+                timeout=10, verify=False)
+        except Exception:
+            pass
         self._upsert()
 
     def _upsert(self):
         doc = dict(self.state)
-        doc_id_val = f"{self.run_id}_{doc.get('tab_type', 'unknown')}"
+        doc_id_val = self.run_id
         try:
             requests.post(
                 f"{self.es_host}/{self.index}/_doc/{doc_id_val}",

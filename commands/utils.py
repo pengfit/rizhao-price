@@ -38,7 +38,7 @@ def _run_playwright(cmd: str, *args) -> Dict:
         ['node', js_path, cmd] + list(args),
         capture_output=True, text=True,
         cwd=SCRIPT_DIR,
-        timeout=120,
+        timeout=600,
         env={**os.environ, 'PATH': os.environ.get('PATH', '')}
     )
     if proc.returncode != 0:
