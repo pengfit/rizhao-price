@@ -15,19 +15,31 @@ cd ~/.openclaw/workspace/skills/rizhao-price
 ./run.sh sync                 # 增量同步到 ES
 ./run.sh sync --dry-run       # 预览同步（不写入）
 ./run.sh sync --reset         # 重置进度，从头开始
-./run.sh sync --force         # 强制全量同步（跳过增量检测）
+./run.sh sync --force         # 强制全量同步（跳过增量检测，会覆盖已有数据）
 ./run.sh sync --type 1        # 指定类别同步
-./run.sh sync --max-pages 5   # 限制最大页数
+./run.sh sync --max-pages 5  # 限制最大页数
+./run.sh sync --no-check      # 跳过增量检测，直接同步
 ./run.sh status               # 查看同步状态
 ./run.sh test                 # 测试 ES 连接和源站
 ./run.sh check                # 检查源站是否有新数据
 ```
 
+> 三个类别需分别执行 sync：type 1（建设工程材料，109 页/1083 条）、type 2（园林绿化苗木，1 页/7 条）、type 3（区县材料，6 页/60 条）。
+
 ---
 
 ## 技术方案
 
-**采用 Playwright 浏览器自动化**：目标站点为 Vue SPA，所有数据通过 JS 动态渲染，REST API 无法直接调用。改用 Playwright 驱动 Chrome Headless 抓取页面 DOM，数据稳定可靠。
+**采用 Playwright 浏览器自动化 + 流式输出模式**：
+
+- 目标站点为 Vue SPA，所有数据通过 JS 动态渲染
+- `fetch_data.js` 提供 3 种模式：
+  - `metadata`：获取 tabs 和当前期数
+  - `paginate <type> <page>`：抓取单页（兼容旧调用）
+  - `stream <type> <maxPages>`：**推荐** — 单次浏览器启动，连续翻页抓取，每页抓完立即输出 JSON Lines，subprocess 实时读取实现边抓边写
+- `sync.py` 通过 `subprocess.Popen` + 行缓冲管道驱动 `stream` 模式
+- 单次浏览器启动翻完所有页，109 页总耗时约 60s
+- 每页写入 ES 后立即更新进度（ES 进度索引），支持中断续传
 
 依赖：
 - Node.js + playwright (`npm install playwright`)
@@ -94,6 +106,8 @@ _id = MD5(breed + "_" + spec + "_" + unit + "_" + period + "_" + str(price) + "_
 
 **索引**：`material_rizhao_price`（可配 `config.yml`）
 
+> **重要**：ES 单机部署时会自动设置 `number_of_replicas=0`，避免 yellow 状态。
+
 **Mapping**：
 ```json
 {
@@ -142,11 +156,26 @@ _id = MD5(breed + "_" + spec + "_" + unit + "_" + period + "_" + str(price) + "_
 
 ## API 结构
 
-目标站点为 Vue SPA，数据通过 JS 动态渲染，无公开 REST API。采用 Playwright 浏览器自动化抓取：
+`fetch_data.js` 三种工作模式（Node.js + Playwright）：
 
-- `commands/fetch_data.js`：Node.js Playwright 脚本
-- `metadata`：获取 tabs 和当前期数
-- `fetch`：抓取全量数据（自动翻页）
+```bash
+# 获取 tabs 和期数
+node commands/fetch_data.js metadata
+
+# 抓取单页（兼容旧调用）
+node commands/fetch_data.js paginate 1 5   # type=1, page=5
+
+# 流式抓取全部（推荐，subprocess 管道驱动）
+node commands/fetch_data.js stream 1 200    # type=1, maxPages=200
+```
+
+`stream` 模式输出 JSON Lines，每行格式：
+```json
+{"page":1,"rows":[...],"totalCount":1083,"totalPages":109,"periods":"2026-03","pageSize":10}
+```
+最后一行为 `{"done":true,...}` 标记结束。
+
+`sync.py` 通过 `StreamFetcher` 类（Popen + fdopen 行缓冲）实时读取管道，实现边抓取边写入 ES。
 
 ---
 
