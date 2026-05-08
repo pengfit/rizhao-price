@@ -1,0 +1,11 @@
+es:
+  host: http://localhost:59200
+  index: material_rizhao_price
+  sync_progress_index: material_rizhao_price_sync_progress
+
+site:
+  base_url: http://58.59.43.227:81/EpointSDRZ
+  price_page: http://58.59.43.227:81/dist/#/index/priceDissemination
+
+sync:
+  last_period: ""
