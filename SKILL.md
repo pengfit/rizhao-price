@@ -11,21 +11,33 @@ cd ~/.openclaw/workspace/skills/rizhao-price
 
 ./run.sh preview              # 预览（不写入 ES）
 ./run.sh preview --pages 3    # 预览前 3 页
-./run.sh preview --type 1     # 指定类别（1=建设工程材料,2=园林绿化苗木,3=区县建设工程材料）
+./run.sh preview --type 1     # 指定类别（1=建设工程材料,2=园林绿化苗木,3=区县材料）
 ./run.sh sync                 # 增量同步到 ES
 ./run.sh sync --dry-run       # 预览同步（不写入）
 ./run.sh sync --reset         # 重置进度，从头开始
 ./run.sh sync --force         # 强制全量同步（跳过增量检测）
+./run.sh sync --type 1        # 指定类别同步
+./run.sh sync --max-pages 5   # 限制最大页数
 ./run.sh status               # 查看同步状态
-./run.sh test                 # 测试 ES 连接
+./run.sh test                 # 测试 ES 连接和源站
 ./run.sh check                # 检查源站是否有新数据
 ```
 
 ---
 
+## 技术方案
+
+**采用 Playwright 浏览器自动化**：目标站点为 Vue SPA，所有数据通过 JS 动态渲染，REST API 无法直接调用。改用 Playwright 驱动 Chrome Headless 抓取页面 DOM，数据稳定可靠。
+
+依赖：
+- Node.js + playwright (`npm install playwright`)
+- Chromium Headless（自动下载到 `~/Library/Caches/ms-playwright/`）
+
+---
+
 ## 增量逻辑
 
-按**最新发布期数**判断：程序自动获取源站当前最新期数，与 config 中记录的 `last_period` 对比。
+按**最新发布期数**判断：程序自动获取源站当前最新期数（从页面日期选择器提取），与 config 中记录的 `last_period` 对比。
 
 ---
 
@@ -47,7 +59,7 @@ cd ~/.openclaw/workspace/skills/rizhao-price
 - **tabType=2**：园林绿化苗木
 - **tabType=3**：区县建设工程材料（各区县独立价格）
 
-每页数据为 Element UI Table 结构，包含材料名称/规格型号/单位及价格列。
+每页数据为 Element UI Table 结构，包含材料名称/规格型号/单位/参考价格。
 
 ---
 
@@ -69,10 +81,10 @@ _id = MD5(breed + "_" + spec + "_" + unit + "_" + period + "_" + str(price) + "_
 | spec | 规格型号（ggxh）|
 | unit | 单位（dw）|
 | price | 参考价格 |
-| period | 期数（如 2026-04）|
+| period | 期数（如 2026-03）|
 | province | 山东省 |
 | city | 日照市 |
-| county | 区县 |
+| county | 区县（tabType=3 时区分）|
 | update_date | 更新日期（由 period 转换）|
 | create_time | 入库时间（yyyy-MM-dd HH:mm:ss）|
 
@@ -119,6 +131,7 @@ _id = MD5(breed + "_" + spec + "_" + unit + "_" + period + "_" + str(price) + "_
 | period | 当前期数 |
 | current_page | 当前页码 |
 | total_pages | 总页数 |
+| total_count | 总记录数 |
 | docs_written | 已写入文档数 |
 | percent | 完成百分比 |
 | duration_sec | 已耗时（秒）|
@@ -129,11 +142,11 @@ _id = MD5(breed + "_" + spec + "_" + unit + "_" + period + "_" + str(price) + "_
 
 ## API 结构
 
-- **基础URL**：`http://58.59.43.227:81/EpointSDRZ/rest/zjzmaterialpriceserver`
-- **gettabcolumn**：获取三个类别-tab 及树表头
-- **getleftcolumn**：获取材料分类树（需 body: {tabType:"1"}）
-- **getreleaseprice**：获取价格数据（需 body: {pageIndex, pageSize, tabType, id, condition, periods}）
-- **getmaterialdescription**：获取说明文本
+目标站点为 Vue SPA，数据通过 JS 动态渲染，无公开 REST API。采用 Playwright 浏览器自动化抓取：
+
+- `commands/fetch_data.js`：Node.js Playwright 脚本
+- `metadata`：获取 tabs 和当前期数
+- `fetch`：抓取全量数据（自动翻页）
 
 ---
 
@@ -176,6 +189,8 @@ rizhao-price/
 ├── SKILL.md
 ├── run.sh              # 入口脚本
 ├── config.yml          # ES/站点配置
+├── package.json        # npm 依赖
+├── node_modules/       # playwright（自动安装）
 ├── .rizhao_sync_progress.json  # 进度文件（自动生成）
 └── commands/
     ├── sync.py         # 同步主程序
@@ -183,7 +198,8 @@ rizhao-price/
     ├── status.py
     ├── test.py
     ├── check.py
-    └── utils.py        # SiteSession、parse_page、ensure_index
+    ├── fetch_data.js   # Playwright 浏览器抓取脚本
+    └── utils.py        # 工具函数
 ```
 
 ---
@@ -191,7 +207,8 @@ rizhao-price/
 ## 依赖
 
 - Python 3
+- Node.js + npm
+- playwright（`npm install playwright`，自动下载 Chromium）
 - requests
-- beautifulsoup4
 - pyyaml
 - Elasticsearch 7.x / 8.x

@@ -1,8 +1,7 @@
-"""日照工程造价信息 - SiteSession 和解析函数"""
-import sys, os, re, yaml, warnings, requests
+"""日照工程造价信息 - SiteSession 和解析函数（Playwright 版）"""
+import sys, os, re, yaml, json, subprocess, hashlib, warnings, requests
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
-from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
 
@@ -10,10 +9,6 @@ DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate',
-    'Content-Type': 'application/json',
-    'Origin': 'http://58.59.43.227:81',
-    'Referer': 'http://58.59.43.227:81/dist/',
 }
 
 # 日照市辖区县
@@ -32,133 +27,80 @@ TAB_TYPES = {
     '3': '区县建设工程材料',
 }
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CHROME_PATH = '/Users/pengfit/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
 
-class SiteSession:
-    """日照 EpointSDRZ 站点 Session"""
 
-    def __init__(self, max_retries: int = 5, timeout: int = 60):
-        self.base_url = 'http://58.59.43.227:81/EpointSDRZ'
+def _run_playwright(cmd: str, *args) -> Dict:
+    """调用 playwright fetch_data.js，返回解析后的 JSON 数据"""
+    js_path = os.path.join(SCRIPT_DIR, 'fetch_data.js')
+    proc = subprocess.run(
+        ['node', js_path, cmd] + list(args),
+        capture_output=True, text=True,
+        cwd=SCRIPT_DIR,
+        timeout=120,
+        env={**os.environ, 'PATH': os.environ.get('PATH', '')}
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"playwright failed: {proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def get_metadata() -> Dict:
+    """获取站点元数据：tabs 和当前期数"""
+    return _run_playwright('metadata')
+
+
+def fetch_page(tab_type: str, page: int, page_size: int = 10) -> Dict:
+    """抓取指定类别+页码的数据"""
+    return _run_playwright('fetch', tab_type, str(1), str(200))
+
+
+class BrowserSession:
+    """基于 Playwright 的浏览器会话，用于获取材价数据"""
+
+    def __init__(self, tab_type: str = '1', max_retries: int = 3):
+        self.tab_type = tab_type
         self.max_retries = max_retries
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
-        # 获取初始 sid cookie
-        self._fetch_init()
+        self.metadata = None
+        self._fetch_metadata()
 
-    def _fetch_init(self):
-        """获取初始 session cookie（GET 主页面产生 302 -> sid cookie）"""
+    def _fetch_metadata(self):
         try:
-            self.session.get(
-                f"{self.base_url}/rest/zjzmaterialpriceserver/gettabcolumn",
-                json={"body": {}},
-                timeout=self.timeout,
-                verify=False,
-                allow_redirects=True
-            )
-            # 强制 GET 访问主页以获取 sid cookie
-            self.session.get(
-                f"{self.base_url}/frame/pages/index/priceDissemination",
-                timeout=self.timeout,
-                verify=False,
-                allow_redirects=False
-            )
+            self.metadata = get_metadata()
         except Exception:
-            pass
+            self.metadata = {'tabs': [], 'periods': ''}
 
-    def _do_post(self, endpoint: str, data: Dict) -> Optional[Dict]:
-        """POST JSON 到指定端点"""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        for attempt in range(self.max_retries):
-            try:
-                resp = self.session.post(
-                    url, json=data, timeout=self.timeout, verify=False
-                )
-                if resp.status_code == 200:
-                    try:
-                        return resp.json()
-                    except Exception:
-                        pass
-            except Exception:
-                if attempt < self.max_retries - 1:
-                    import time; time.sleep(2 * (attempt + 1))
-        return None
+    def get_current_period(self) -> str:
+        if self.metadata:
+            return self.metadata.get('periods', '')
+        return datetime.now().strftime('%Y-%m')
 
-    def get_tabs(self) -> Tuple[List[Dict], List[List[str]]]:
-        """获取三个类别 tab 及树表头"""
-        data = self._do_post(
-            'rest/zjzmaterialpriceserver/gettabcolumn',
-            {"body": {}}
-        )
-        if not data:
-            return [], []
-        custom = data.get('custom', {})
-        arr = custom.get('data', {})
-        tab_list = arr.get('data', [])
-        tree_head_list = arr.get('treeHeadList', [])
-        return tab_list, tree_head_list
+    def get_tabs(self) -> List[Dict]:
+        if self.metadata:
+            return self.metadata.get('tabs', [])
+        return []
 
-    def get_left_column(self, tab_type: str) -> List[Dict]:
-        """获取材料分类树"""
-        data = self._do_post(
-            'rest/zjzmaterialpriceserver/getleftcolumn',
-            {"body": {"tabType": tab_type}}
-        )
-        if not data:
-            return []
-        custom = data.get('custom', {})
-        arr = custom.get('data', {})
-        return arr if isinstance(arr, list) else arr.get('data', [])
+    def get_data(self, max_pages: int = 200) -> Dict:
+        """获取全部数据（自动翻页）"""
+        return _run_playwright('fetch', self.tab_type, str(max_pages))
 
-    def get_release_price(self, tab_type: str, page_index: int, page_size: int,
-                          material_id: str = '', condition: str = '', periods: str = '') -> Optional[Dict]:
-        """获取价格列表数据"""
-        data = self._do_post(
-            'rest/zjzmaterialpriceserver/getreleaseprice',
-            {
-                "body": {
-                    "pageIndex": page_index,
-                    "pageSize": page_size,
-                    "tabType": tab_type,
-                    "id": material_id,
-                    "condition": condition,
-                    "periods": periods,
-                }
-            }
-        )
-        return data
-
-    def get_material_description(self) -> str:
-        """获取材料价格说明"""
-        data = self._do_post(
-            'rest/zjzmaterialpriceserver/getmaterialdescription',
-            {"body": {}}
-        )
-        if not data:
-            return ''
-        custom = data.get('custom', {})
-        return custom.get('data', {}).get('explain', '')
+    def get_total_count(self) -> int:
+        data = self.get_data(max_pages=1)
+        return data.get('totalCount', 0)
 
 
-def parse_page(data: Dict) -> Tuple[List[Dict], int, int]:
-    """
-    解析 getreleaseprice 返回的 JSON 数据。
-    返回: (rows: List[Dict], total: int, page_size: int)
+def parse_data(data: Dict) -> Tuple[List[Dict], int, str]:
+    """解析 fetch_data 输出"""
+    rows = data.get('rows', [])
+    total = data.get('totalCount', 0)
+    periods = data.get('periods', '')
+    return rows, total, periods
 
-    价格列结构（动态，根据 isFirst/isSecond/isThird）：
-    - isFirst=true: price 列（单一价格）
-    - isSecond=true: price(上半月) + secondPrice(下半月)
-    - isThird=true: price(上旬) + secondPrice(中旬) + thirdPrice(下旬)
-    - tax=true: 还有税率列
-    """
-    custom = data.get('custom', {})
-    result_data = custom.get('data', {})
 
-    rows = result_data.get('data', [])
-    total = result_data.get('count', 0)
-    periods = result_data.get('periods', '')
-    remark = result_data.get('remark', '')
-
-    return rows, total, periods, remark
+def doc_id(breed: str, spec: str, unit: str, period: str, price: float, city: str, county: str) -> str:
+    raw = f"{breed}_{spec}_{unit}_{period}_{price}_{city}_{county}"
+    return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
 def ensure_index(es_host: str, es_index: str):
@@ -199,6 +141,7 @@ def ensure_progress_index(es_host: str, idx: str):
             "period": {"type": "keyword"},
             "current_page": {"type": "integer"},
             "total_pages": {"type": "integer"},
+            "total_count": {"type": "integer"},
             "docs_written": {"type": "integer"},
             "percent": {"type": "float"},
             "duration_sec": {"type": "float"},

@@ -1,0 +1,12 @@
+{
+  "name": "rizhao-price",
+  "version": "1.0.0",
+  "description": "日照工程造价材料信息采集",
+  "main": "index.js",
+  "scripts": {
+    "test": "node commands/fetch_data.js test"
+  },
+  "dependencies": {
+    "playwright": "^1.59.0"
+  }
+}

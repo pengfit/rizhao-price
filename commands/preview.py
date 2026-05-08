@@ -4,53 +4,41 @@ import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 warnings.filterwarnings('ignore')
-from commands.utils import SiteSession, parse_page, TAB_TYPES
+from commands.utils import BrowserSession, TAB_TYPES, get_metadata
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--pages', type=int, default=2)
-parser.add_argument('--type', default='1', help='类别: 1=建设工程材料,2=园林绿化苗木,3=区县材料')
-parser.add_argument('--material', default='', help='材料ID（左侧树节点）')
+parser.add_argument('--type', default='1', help='类别: 1=建设工程材料, 2=园林绿化苗木, 3=区县材料')
 args = parser.parse_args()
 
-session = SiteSession()
-tab_name = TAB_TYPES.get(args.type, '未知类别')
-
+tab_name = TAB_TYPES.get(args.type, '未知')
 print(f"[i] 类别: {tab_name} ({args.type})")
 
-# 获取材料分类树
-tree = session.get_left_column(args.type)
-if tree:
-    print(f"[i] 材料分类共 {len(tree)} 个节点")
-    for node in tree[:5]:
-        label = node.get('label', '')
-        node_id = node.get('id', '')
-        print(f"  - {label} ({node_id})")
-    if len(tree) > 5:
-        print(f"  ... 共 {len(tree)} 个")
-else:
-    print("[!] 材料分类树为空")
+# 显示元数据
+try:
+    meta = get_metadata()
+    print(f"[i] 当前期数: {meta.get('periods', '未知')}")
+    print(f"[i] 可用类别: {[t.get('name','') for t in meta.get('tabs', [])]}")
+except Exception as e:
+    print(f"[!] 获取元数据失败: {e}")
 
-# 获取价格数据（第一页）
-print(f"\n[--] 第 1 页预览 --")
-data = session.get_release_price(args.type, 1, args.pages * 10, args.material)
-if not data:
-    print("[!] 获取数据失败")
-else:
-    rows, total, periods, remark = parse_page(data)
-    print(f"[i] 总记录: {total}, 期数: {periods}")
-    if remark:
-        print(f"[i] 备注: {remark}")
-    print(f"\n前 {min(args.pages, 2)} 页数据:")
-    for page in range(1, min(args.pages + 1, 3)):
-        if page > 1:
-            data = session.get_release_price(args.type, page, 10, args.material)
-            if data:
-                rows, _, _, _ = parse_page(data)
-        print(f"\n  -- 第 {page} 页 --")
-        if not rows:
-            print("  (无数据)")
-            continue
-        for row in rows[:5]:
-            print(f"    {row.get('clmc','')} | {row.get('ggxh','')} | {row.get('dw','')} | price={row.get('price','')}")
-        if len(rows) > 5:
-            print(f"  ... 共 {len(rows)} 条")
+# 获取数据（只抓取前 N 页）
+session = BrowserSession(tab_type=args.type)
+data = session.get_data(max_pages=args.pages)
+
+rows = data.get('rows', [])
+total = data.get('totalCount', 0)
+periods = data.get('periods', '')
+page_size = data.get('pageSize', 10)
+total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+
+print(f"\n[i] 总记录: {total}, 期数: {periods}")
+print(f"[i] 每页 {page_size} 条，共约 {total_pages} 页")
+print(f"\n前 {min(args.pages * page_size, len(rows))} 条预览:")
+
+shown = 0
+for row in rows:
+    if shown >= args.pages * page_size:
+        break
+    print(f"  {row.get('clmc')} | {row.get('ggxh')} | {row.get('dw')} | {row.get('price')}")
+    shown += 1

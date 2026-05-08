@@ -1,0 +1,5 @@
+node_modules/
+__pycache__/
+*.pyc
+.rizhao_sync_progress.json
+*.log
