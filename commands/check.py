@@ -85,8 +85,11 @@ def main():
     # 情况1：新周期出现
     if current_period and saved_period and current_period != saved_period:
         print(f'[i] 新周期出现: {current_period} (上次: {saved_period})')
-        print('[→] 触发全量同步...')
-        os.system(f'cd {script_dir} && python3 commands/sync.py --force')
+        print('[→] 触发全量同步（所有 tab）...')
+        for tab_type, tab_name in TAB_TYPES.items():
+            print(f'[→] 同步 tab {tab_type} {tab_name}...')
+            ret = os.system(f'cd {script_dir} && python3 commands/sync.py --type {tab_type} --force --no-check')
+            print(f'[✓] tab {tab_type} 完成' if ret == 0 else f'[!] tab {tab_type} 失败')
         return
 
     # 情况2：同周期，检测各 tab 是否有新增
@@ -136,9 +139,19 @@ def main():
     for c in changed:
         print(f'  {c["tab_name"]}: 网站 {c["web_total"]} > ES {c["es_count"]}  (+{c["diff"]})')
 
-    # 增量同步：跑 sync.py，幂等写入会自动补漏
-    print('[→] 触发增量同步...')
-    os.system(f'cd {script_dir} && python3 commands/sync.py --force')
+    print('[→] 触发增量同步（逐 tab）...')
+    # 逐 tab 触发同步，每个 tab 幂等写入自动补漏
+    for c in changed:
+        tab_type = c['tab_type']
+        tab_name = c['tab_name']
+        print(f'[→] 同步 tab {tab_type} {tab_name}...')
+        ret = os.system(f'cd {script_dir} && python3 commands/sync.py --type {tab_type} --force --no-check')
+        if ret != 0:
+            print(f'[!] tab {tab_type} 同步失败，exit code {ret}')
+        else:
+            print(f'[✓] tab {tab_type} {tab_name} 完成')
+
+    print('[i] 增量同步全部完成')
 
 
 if __name__ == '__main__':
