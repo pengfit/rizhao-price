@@ -132,6 +132,8 @@ def ensure_index(es_host: str, es_index: str):
                 "province":    {"type": "keyword"},
                 "city":        {"type": "keyword"},
                 "county":      {"type": "keyword"},
+                "tab_type":    {"type": "keyword"},
+                "tab_name":    {"type": "keyword"},
                 "update_date": {"type": "date", "format": "yyyy-MM-dd"},
                 "create_time": {"type": "date", "format": "yyyy-MM-dd HH:mm:ss||yyyy-MM-dd||strict_date_optional_time"}
             }

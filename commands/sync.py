@@ -29,7 +29,7 @@ def _print_progress(page, total_pages, written, failed, dry_run):
     sys.stdout.flush()
 
 
-def _make_doc(row: dict, city: str, county: str, period: str) -> dict:
+def _make_doc(row: dict, city: str, county: str, period: str, tab_type: str = '', tab_name: str = '') -> dict:
     price_str = str(row.get('price') or '')
     try:
         price_val = float(re.sub(r'[￥,，元\-\s]', '', price_str))
@@ -47,6 +47,8 @@ def _make_doc(row: dict, city: str, county: str, period: str) -> dict:
         'province': '山东省',
         'city': city,
         'county': county,
+        'tab_type': tab_type,
+        'tab_name': tab_name,
         'update_date': update_date,
         'create_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
@@ -372,7 +374,7 @@ def main():
     current_page = 1
     if start_page <= 1:
         rows = page1_data.get('rows', [])
-        docs = [_make_doc(r, '日照市', '日照市', fetched_period) for r in rows if r.get('clmc')]
+        docs = [_make_doc(r, '日照市', '日照市', fetched_period, args.type, tab_name) for r in rows if r.get('clmc')]
         if docs:
             result = _bulk_write_with_retry(es_host, es_index, docs, args.dry_run, max_retries=3)
             total_docs_written += result['written']
@@ -403,7 +405,7 @@ def main():
 
         page_num = page_data.get('page', current_page)
         rows = page_data.get('rows', [])
-        docs = [_make_doc(r, '日照市', '日照市', fetched_period) for r in rows if r.get('clmc')]
+        docs = [_make_doc(r, '日照市', '日照市', fetched_period, args.type, tab_name) for r in rows if r.get('clmc')]
 
         if docs:
             result = _bulk_write_with_retry(es_host, es_index, docs, args.dry_run, max_retries=3)
