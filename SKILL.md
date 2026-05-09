@@ -54,7 +54,34 @@ cd ~/.openclaw/workspace/skills/rizhao-price
 
 ## 增量逻辑
 
-按**最新发布期数**判断：程序自动获取源站当前最新期数（从页面日期选择器提取），与 config 中记录的 `last_period` 对比。
+### 自动检测（check.py）
+
+每 30 分钟 cron 触发 `check.py`，检测逻辑分两级：
+
+**1. 周期维度**：网站当前期数 vs config `last_period` → 不同则触发全量同步（逐 tab）
+
+**2. tab 维度**：同周期内，逐 tab 对比：
+
+```
+网站 totalCount (tab=1/2/3)  vs  ES 计数 (tab_type=1/2/3 AND period=当前期)
+```
+
+差值为正 → 该 tab 有新增 → 触发 `sync.py --type N` 增量补漏。
+
+幂等写入机制保证重复同步不会产生重复数据：
+
+```
+_id = MD5(breed + spec + unit + period + price + city + county)
+```
+
+### ES 字段
+
+| 字段 | 说明 |
+|------|------|
+| tab_type | 类别 ID（1/2/3）|
+| tab_name | 类别名称 |
+| period | 期数（如 2026-03）|
+| county | 区县（tab=3 时区分各区县）|
 
 ---
 
